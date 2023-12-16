@@ -92,10 +92,10 @@ class Variable:
         """
         self.grad = None
 
-    def backward(self, retain_grad=False):
+    def backward(self, retain_grad=False, create_graph=False):
         # 勾配の初期値を1にする(dy/dy)
         if self.grad is None:
-            self.grad = np.ones_like(self.data)
+            self.grad = Variable(np.ones_like(self.data))
 
         # 自身の生みの親関数リスト. 再起よりもループで処理した方が処理時間も早く、後々の実装も楽になる
         funcs = []
@@ -112,26 +112,29 @@ class Variable:
         while len(funcs) != 0:
             f: Function = funcs.pop()  # 末尾からpop→最も新しい世代の関数を取得
             gys = [output().grad for output in f.outputs]  # 弱参照から値を取得
-            gxs = f.backward(*gys)  # アンパッキングして渡す.
-            if not isinstance(gxs, tuple):
-                gxs = (gxs,)
 
-            for x, gx in zip(f.inputs, gxs):
-                if x.grad is None:
-                    x.grad = gx
-                else:
-                    # xの勾配がすでに計算済みの場合は上書きせず加算する必要がある.
-                    # (入力に同じ変数が複数使われていた場合)
-                    x.grad = x.grad + gx  # +=で書くと後々問題になる
+            # デフォルトで勾配を保持しないモードで計算する.
+            with using_config("enable_backprop", create_graph):
+                gxs = f.backward(*gys)  # Functionの__call__が呼ばれる。
+                if not isinstance(gxs, tuple):
+                    gxs = (gxs,)
 
-                # Noneの場合は生みの親関数がいない→ユーザ入力したVariable
-                if x.creator is not None:
-                    add_func(x.creator)
+                for x, gx in zip(f.inputs, gxs):
+                    if x.grad is None:
+                        x.grad = gx
+                    else:
+                        # xの勾配がすでに計算済みの場合は上書きせず加算する必要がある.
+                        # (入力に同じ変数が複数使われていた場合)
+                        x.grad = x.grad + gx  # Add関数オブジェクトが呼ばれる.
 
-            # メモリ使用量のため使用済みの勾配を破棄する。
-            if not retain_grad:
-                for y in f.outputs:
-                    y().grad = None
+                    # Noneの場合は生みの親関数がいない→ユーザ入力したVariable
+                    if x.creator is not None:
+                        add_func(x.creator)
+
+                # メモリ使用量のため使用済みの勾配を破棄する。
+                if not retain_grad:
+                    for y in f.outputs:
+                        y().grad = None
 
 
 def as_variable(obj):
@@ -152,7 +155,7 @@ class Function:
 
     def __call__(self, *inputs):
         inputs_var: list[Variable] = [as_variable(x) for x in inputs]
-        xs = [x.data for x in inputs_var] # np.ndarrayを取得.
+        xs = [x.data for x in inputs_var]  # np.ndarrayを取得.
         ys = self.forward(*xs)  # アンパッキングして渡す.
         if not isinstance(ys, tuple):
             ys = (ys,)
@@ -186,7 +189,7 @@ class Function:
         """
         raise NotImplementedError()
 
-    def backward(self, gys: tuple[np.ndarray]) -> tuple[np.ndarray]:
+    def backward(self, gys: tuple[Variable]) -> tuple[Variable]:
         """
         誤差逆伝播を行う.
         :param gys: forward出力側の微分量
@@ -209,7 +212,7 @@ class Square(Function):
         return x ** 2
 
     def backward(self, gys):
-        x = self.inputs[0].data
+        x: Variable = self.inputs[0]
         x_grad = 2 * x * gys  # 微分の連鎖律
         return x_grad
 
@@ -227,9 +230,9 @@ class Exp(Function):
     def forward(self, x):
         return np.exp(x)
 
-    def backward(self, y_grads):
-        x = self.inputs[0].data
-        x_grad = np.exp(x) * y_grads  # 上流からの微分量を受け継いでいく.(連鎖律)
+    def backward(self, gys):
+        x = self.inputs[0]
+        x_grad = np.exp(x) * gys  # 上流からの微分量を受け継いでいく.(連鎖律)
         return x_grad
 
 
@@ -245,8 +248,8 @@ class Add(Function):
     def forward(self, x0, x1):
         return x0 + x1
 
-    def backward(self, y_grads):
-        return y_grads, y_grads
+    def backward(self, gys):
+        return gys, gys
 
 
 def add(x0, x1):
@@ -291,7 +294,7 @@ class Mul(Function):
         return x0 * x1
 
     def backward(self, gy):
-        x0, x1 = self.inputs[0].data, self.inputs[1].data
+        x0, x1 = self.inputs[0], self.inputs[1]
         # それぞれ偏微分するのでx0とx1が入れ替わる
         return gy * x1, gy * x0
 
@@ -312,7 +315,7 @@ class Div(Function):
         return x0 / x1
 
     def backward(self, gy):
-        x0, x1 = self.inputs[0].data, self.inputs[1].data
+        x0, x1 = self.inputs[0], self.inputs[1]
         gx0 = gy / x1
         gx1 = gy * (-x0 / x1 ** 2)
         return gx0, gx1
@@ -340,7 +343,7 @@ class Pow(Function):
         return x ** self.c
 
     def backward(self, gy):
-        x = self.inputs[0].data
+        x = self.inputs[0]
         return gy * self.c * x ** (self.c - 1)
 
 
@@ -376,7 +379,7 @@ class Sin(Function):
         return np.sin(x)
 
     def backward(self, gy):
-        x = self.inputs[0].data
+        x = self.inputs[0]
         return gy * np.cos(x)
 
 

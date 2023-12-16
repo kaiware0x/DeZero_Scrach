@@ -4,6 +4,8 @@ import numpy as np
 import weakref
 import contextlib
 
+import dezero
+
 
 class Config:
     enable_backprop = True
@@ -50,7 +52,7 @@ class Variable:
 
         self.data: np.ndarray = data
         self.name: str = name
-        self.grad: np.ndarray = None
+        self.grad: Variable = None
         self.creator = None
         self.generation = 0  # selfVariableインスタンスは計算グラフの何世代目か？
 
@@ -74,6 +76,21 @@ class Variable:
             return "variable(None)"
         p = str(self.data).replace("\n", "\n" + " " * 9)
         return f"variable({p})"
+
+    def reshape(self, *shape):
+        if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
+            shape = shape[0]
+        return dezero.functions.reshape(self, shape)
+
+    def transpose(self):
+        return dezero.functions.transpose(self)
+
+    @property
+    def T(self):
+        return self.transpose()
+
+    def sum(self, axis=None, keepdims=False):
+        return dezero.functions.sum(self, axis, keepdims)
 
     def set_creator(self, func) -> None:
         """
@@ -131,10 +148,10 @@ class Variable:
                     if x.creator is not None:
                         add_func(x.creator)
 
-                # メモリ使用量のため使用済みの勾配を破棄する。
-                if not retain_grad:
-                    for y in f.outputs:
-                        y().grad = None
+            # メモリ使用量のため使用済みの勾配を破棄する。
+            if not retain_grad:
+                for y in f.outputs:
+                    y().grad = None
 
 
 def as_variable(obj):
@@ -176,10 +193,10 @@ class Function:
             self.inputs: list[Variable] = inputs_var  # 逆伝播で使うので覚えておく.
             self.outputs = [weakref.ref(output) for output in outputs]
 
-        if len(outputs) == 1:
-            return outputs[0]
-        else:
+        if len(outputs) > 1:
             return outputs
+        else:
+            return outputs[0]
 
     def forward(self, xs: tuple[np.ndarray]) -> tuple[np.ndarray]:
         """
@@ -202,54 +219,19 @@ class Function:
 # -------------------------------------------------------------
 # -------------------------------------------------------------
 
-
-# -------------------------------------------------------------
-# -------------------------------------------------------------
-# -------------------------------------------------------------
-
-class Square(Function):
-    def forward(self, x):
-        return x ** 2
-
-    def backward(self, gys):
-        x: Variable = self.inputs[0]
-        x_grad = 2 * x * gys  # 微分の連鎖律
-        return x_grad
-
-
-def square(x):
-    return Square()(x)
-
-
-# -------------------------------------------------------------
-# -------------------------------------------------------------
-# -------------------------------------------------------------
-
-
-class Exp(Function):
-    def forward(self, x):
-        return np.exp(x)
-
-    def backward(self, gys):
-        x = self.inputs[0]
-        x_grad = np.exp(x) * gys  # 上流からの微分量を受け継いでいく.(連鎖律)
-        return x_grad
-
-
-def exp(x):
-    return Exp()(x)
-
-
-# -------------------------------------------------------------
-# -------------------------------------------------------------
-# -------------------------------------------------------------
-
 class Add(Function):
-    def forward(self, x0, x1):
+    def forward(self, x0: np.ndarray, x1: np.ndarray):
+        self.x0_shape = x0.shape
+        self.x1_shape = x1.shape
         return x0 + x1
 
-    def backward(self, gys):
-        return gys, gys
+    def backward(self, gy: Variable):
+        gx0, gx1 = gy, gy
+        # forwardでBroadcastによる配列の拡張が行われていた場合は元のShapeに戻す
+        if self.x0_shape != self.x1_shape:
+            gx0 = dezero.functions.sum_to(gx0, self.x0_shape)
+            gx1 = dezero.functions.sum_to(gx1, self.x1_shape)
+        return gx0, gx1
 
 
 def add(x0, x1):
@@ -264,11 +246,18 @@ def add(x0, x1):
 
 class Sub(Function):
 
-    def forward(self, x0, x1):
+    def forward(self, x0: np.ndarray, x1: np.ndarray):
+        self.x0_shape = x0.shape
+        self.x1_shape = x1.shape
         return x0 - x1
 
-    def backward(self, gy):
-        return gy, -gy
+    def backward(self, gy: Variable):
+        gx0, gx1 = gy, -gy
+        # forwardでBroadcastによる配列の拡張が行われていた場合は元のShapeに戻す
+        if self.x0_shape != self.x1_shape:
+            gx0 = dezero.functions.sum_to(gx0, self.x0_shape)
+            gx1 = dezero.functions.sum_to(gx1, self.x1_shape)
+        return gx0, gx1
 
 
 def sub(x0, x1):
@@ -290,13 +279,23 @@ class Mul(Function):
     乗算を行う関数オブジェクト
     """
 
-    def forward(self, x0, x1):
+    def forward(self, x0: np.ndarray, x1: np.ndarray):
+        self.x0_shape = x0.shape
+        self.x1_shape = x1.shape
         return x0 * x1
 
-    def backward(self, gy):
+    def backward(self, gy: Variable):
         x0, x1 = self.inputs[0], self.inputs[1]
+        gx0 = x1 * gy
+        gx1 = x0 * gy
+
+        # forwardでBroadcastによる配列の拡張が行われていた場合は元のShapeに戻す
+        if self.x0_shape != self.x1_shape:
+            gx0 = dezero.functions.sum_to(gx0, self.x0_shape)
+            gx1 = dezero.functions.sum_to(gx1, self.x1_shape)
+
         # それぞれ偏微分するのでx0とx1が入れ替わる
-        return gy * x1, gy * x0
+        return gx0, gx1
 
 
 def mul(x0, x1):
@@ -311,13 +310,21 @@ def mul(x0, x1):
 
 class Div(Function):
 
-    def forward(self, x0, x1):
+    def forward(self, x0: np.ndarray, x1: np.ndarray):
+        self.x0_shape = x0.shape
+        self.x1_shape = x1.shape
         return x0 / x1
 
-    def backward(self, gy):
+    def backward(self, gy: Variable):
         x0, x1 = self.inputs[0], self.inputs[1]
         gx0 = gy / x1
         gx1 = gy * (-x0 / x1 ** 2)
+
+        # forwardでBroadcastによる配列の拡張が行われていた場合は元のShapeに戻す
+        if self.x0_shape != self.x1_shape:
+            gx0 = dezero.functions.sum_to(gx0, self.x0_shape)
+            gx1 = dezero.functions.sum_to(gx1, self.x1_shape)
+
         return gx0, gx1
 
 
@@ -366,42 +373,6 @@ class Neg(Function):
 
 def neg(x):
     return Neg()(x)
-
-
-# -------------------------------------------------------------
-# -------------------------------------------------------------
-# -------------------------------------------------------------
-
-
-class Sin(Function):
-
-    def forward(self, x):
-        return np.sin(x)
-
-    def backward(self, gy):
-        x = self.inputs[0]
-        return gy * np.cos(x)
-
-
-def sin(x):
-    return Sin()(x)
-
-
-def my_sin(x, threshold=0.0001):
-    """
-    マクローリン展開を用いてSinを計算する.
-    :param x:
-    :param threshold:
-    :return:
-    """
-    y = 0
-    for i in range(100_000):
-        c = (-1) ** i / math.factorial(2 * i + 1)
-        t = c * x ** (2 * i + 1)
-        y = y + t
-        if abs(t.data) < threshold:
-            break
-    return y
 
 
 # -------------------------------------------------------------

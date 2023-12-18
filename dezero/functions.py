@@ -37,7 +37,7 @@ class Exp(Function):
 
     def backward(self, gys):
         x = self.inputs[0]
-        x_grad = np.exp(x) * gys  # 上流からの微分量を受け継いでいく.(連鎖律)
+        x_grad = exp(x) * gys  # 上流からの微分量を受け継いでいく.(連鎖律)
         return x_grad
 
 
@@ -219,3 +219,75 @@ def sum_to(x, shape):
     if x.shape == shape:
         return as_variable(x)
     return SumTo(shape)(x)
+
+
+# -------------------------------------------------------------
+# -------------------------------------------------------------
+# -------------------------------------------------------------
+
+class MatMul(Function):
+    def forward(self, x: np.ndarray, W: np.ndarray):
+        return x.dot(W)
+
+    def backward(self, gy):
+        x = self.inputs[0]
+        W = self.inputs[1]
+        gx = matmul(gy, W.T)
+        gW = matmul(x.T, gy)
+        return gx, gW
+
+
+def matmul(x, W):
+    return MatMul()(x, W)
+
+
+# -------------------------------------------------------------
+# -------------------------------------------------------------
+# -------------------------------------------------------------
+
+class MeanSquaredError(Function):
+    def forward(self, x0: np.ndarray, x1: np.ndarray):
+        diff = x0 - x1
+        return (diff ** 2).sum() / len(diff)
+
+    def backward(self, gy: Variable):
+        x0 = self.inputs[0]
+        x1 = self.inputs[1]
+        diff: Variable = x0 - x1
+        gy = broadcast_to(gy, diff.shape)
+        gx0 = gy * diff * (2.0 / len(diff))
+        gx1 = -gx0
+        return gx0, gx1
+
+
+def mean_squared_error(x0, x1):
+    return MeanSquaredError()(x0, x1)
+
+
+def mean_squared_error_simple(x0, x1) -> Variable:
+    diff = x0 - x1
+    return sum(diff ** 2) / len(diff)
+
+
+# -------------------------------------------------------------
+# -------------------------------------------------------------
+# -------------------------------------------------------------
+
+def linear_simple(x, W, b=None):
+    x, W = as_variable(x), as_variable(W)
+    t = matmul(x, W)
+    if b is None:
+        return t
+
+    y = t + b
+    t.data = None # メモリ効率のため余計なデータは削除
+    return y
+
+
+# -------------------------------------------------------------
+# -------------------------------------------------------------
+# -------------------------------------------------------------
+
+def sigmoid_simple(x):
+    x = as_variable(x)
+    return 1 / (1 + exp(-x))

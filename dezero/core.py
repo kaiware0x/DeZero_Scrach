@@ -181,6 +181,7 @@ class Function:
         outputs = [Variable(as_array(y)) for y in ys]
 
         # 推論時は勾配計算はいらない
+        # 学習中forward計算のときにはTrueになっている
         if Config.enable_backprop:
             # inputs --> self() --> outputs
 
